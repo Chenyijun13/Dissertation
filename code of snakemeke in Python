@@ -1,0 +1,428 @@
+Codes:
+    input:
+        bim=dir_race+"bed/EA.1000g.traitsSNP.prune.inGene.bim"
+    output:
+        gene_p=dir_race + "magma/{trait}.genes.out"
+    params:
+        trait="{trait}",
+        ref_gene_loc = dir_race + "magma/NCBI37.3.gene.loc",
+        gene_anno_prefix=dir_race + "magma/gene_anno",
+        file_anno=dir_race + "magma/gene_anno.genes.annot",
+        ref_prefix=dir_race+"bed/EA.1000g.traitsSNP.prune.inGene",
+        gene_out=dir_race + "magma/{trait}",
+        tsv=dir_race + "matrix/{trait}.tsv",
+        file_snp_p=dir_race+"magma/{trait}.snp.p.tsv",
+        N=lambda wildcards: N_EA_dict[wildcards.trait]
+    shell:
+        '''
+        magma --annotate --snp-loc {input.bim} --gene-loc {params.ref_gene_loc} --out {params.gene_anno_prefix}
+        cat <(echo 'SNP P') <(join <(cat {input.bim}|cut -f2 |sort) <(cat {params.tsv}|sort -k1,1)|awk '{{print $1,$8}}') > {params.file_snp_p}
+        magma --bfile {params.ref_prefix} --pval {params.file_snp_p} N={params.N} --gene-annot {params.file_anno} --out {params.gene_out}
+        '''
+
+
+rule metacca_gene_CA:
+        input:
+            gene_snp=dir_race+"bed/SNP_gene.annot",
+        output:
+            p=dir_race+"metacca_gene/gene_out/{gene}.p.tsv",
+        log: dir_race+"metacca_gene/gene_out/{gene}.log",
+        params:
+            gene="{gene}",
+            matrix_gene=dir_race+"metacca_gene/gene_out/{gene}.matrix",
+            r2=dir_race+"metacca_gene/gene_out/{gene}.ld",
+            snp_list=dir_race+"metacca_gene/gene_out/{gene}.snp.list",
+            input_prefix=dir_race+"bed/EA.1000g.traitsSNP.prune.inGene",
+            out_prefix=dir_race+"metacca_gene/gene_out/{gene}",
+            matrix=dir_race+"matrix/matrix.tsv",
+            N=N_EA,
+        shell:
+            '''
+            cat {input.gene_snp}|grep {params.gene}|awk '{{print $2}}' |grep -v SNP > {params.snp_list}
+
+            if [  $( cat {params.snp_list}|wc -l ) -eq 1 ];
+            then
+            paste <(echo "{params.gene}") <(cat {params.snp_list}) <(echo "NA") > {output.p}
+            fi;
+
+            if [  $( cat {params.snp_list}|wc -l ) -gt 1 ];
+            then
+            cat <(head -n1 {params.matrix}) <(join <(sort {params.snp_list}) <(sort -k1,1 {params.matrix}))|sed 's/ /\\t/g' > {params.matrix_gene}
+            plink --bfile {params.input_prefix} --out {params.out_prefix} --extract {params.snp_list} --r2 inter-chr with-freqs --ld-window-r2 0
+            Rscript ~/tmp/0815/2.code/2.metaCCA_gene.R {params.N} {params.matrix_gene} {params.r2} {output.p} &> {log}
+            fi;
+            '''
+
+rule get_matrix:
+        input:  tsv=    dir_race + "tsv/{trait}.tsv"
+        output: tsv=    dir_race + "matrix/{trait}.tsv"
+        params: list=   dir_race + "tsv/comm.snp.EA.snpid.ingene.list"
+        shell:
+            '''
+            join -a 1 <(cat {params.list}|awk '{{print $2,$1}}'|sort -k1,1) <(sort -k1,1 {input.tsv}) |cut -d' ' -f2-9|sed 's/ /\\t/g' > {output.tsv}
+            '''
+
+cat ../bed/SNP_gene.annot|awk '$4!="."'|awk '{print $4}'|sed 's/|/\n/g'|cut -d'(' -f1|grep -v ANNOT|sort|uniq > gene_in.list
+
+
+rule get_corr_matrix:
+        input:
+            bed=dir_race+"bed/EA.1000g.traitsSNP.prune.inGene.bim"
+        output:
+            cor=dir_race+"corrMatrix/corrMatrix.ld"
+        params:
+            input_prefix=dir_race+"bed/EA.1000g.traitsSNP.prune.inGene",
+            out_prefix=dir_race+"corrMatrix/corrMatrix"
+        threads: 16
+        shell:
+                '''
+                plink --threads {threads} --bfile {params.input_prefix} --out {params.out_prefix} --r2 inter-chr with-freqs --ld-window-r2 0
+                '''
+
+rule annotationSNP:
+        input:
+            bim=dir_race + "bed/EA.1000g.traitsSNP.prune.bim",
+        output:
+            gene_snp_list=  dir_race+ "bed/gene_snp.list"
+        params:
+            ref_gene=       dir_race+"bed/glist-hg19",
+            for_anno=       dir_race+"bed/for_anno.list",
+            anno_prefix=    dir_race+"bed/SNP_gene",
+            input_prefix=   dir_race+"bed/EA.1000g.traitsSNP.prune",
+            out_prefix=     dir_race+"bed/EA.1000g.traitsSNP.prune.inGene"
+        shell:
+            '''
+            cat <(echo 'CHR SNP BP') <(cat {input.bim}|cut -f 1,2,4)|sed 's/ /\\t/g' > {params.for_anno}
+            plink --annotate {params.for_anno} ranges={params.ref_gene} --out {params.anno_prefix}
+            cat {params.anno_prefix}.annot |awk '$4!="." {{print $2}}'|grep -v SNP > {output.gene_snp_list}
+            plink --make-bed --bfile {params.input_prefix} --out {params.out_prefix} --extract {output.gene_snp_list} --geno 0.1 --hwe 0.00001 --maf 0.01
+            '''
+
+rule pruning_EA:
+            input:
+                bed = dir_race+"bed/EA.1000g.traitsSNP.bed"
+            output:
+                bed = dir_race+"bed/EA.1000g.traitsSNP.prune.bed"
+            params:
+                input_prefix    =   dir_race+"bed/EA.1000g.traitsSNP",
+                out_prefix      =   dir_race+"bed/EA.1000g.traitsSNP.prune",
+                pruned_in       =   dir_race+"bed/EA.1000g.traitsSNP.prune.in"
+            shell:
+                '''
+                    plink --bfile {params.input_prefix} --indep-pairwise 50 5 0.3 --out {params.input_prefix}
+                    plink --make-bed --bfile {params.input_prefix} --chr 1-22 --out {params.out_prefix} --extract {params.pruned_in}
+                '''
+
+rule EA_selectTraitSNP:
+        input: bim="~/1000g/plink_file/Eastasian/Eastasian.bim",
+        output: bed = dir_race+ "bed/EA.1000g.traitsSNP.bed"
+        params:
+            snplist=dir_race+"tsv/comm.snp.EA.1000g.list",
+            input_prefix="~/1000g/plink_file/Eastasian/Eastasian",
+            out_prefix=dir_race+ "bed/EA.1000g.traitsSNP"
+        shell:
+            '''
+            plink --make-bed --bfile {params.input_prefix} --out {params.out_prefix} --extract {params.snplist} --geno 0.1 --hwe 0.00001 --maf 0.01
+            '''
+
+rule get_tsv:
+    input: txt=dir_race +"txt/{trait}_BBJ.txt.gz"
+    output: tsv=dir_race +"tsv/{trait}.tsv"
+    shell:
+        '''
+        zcat {input.txt}| perl -lane '$,="\\t";$snp=$F[1].":".$F[2];print $snp,$F[1],$F[2],$F[3],$F[4],$F[7],$F[8],$F[9]'|grep -v BETA> {output.tsv}
+        #zcat ../txt/CAD.auto.rsq07.mac10.txt.gz |
+        perl -lane '$,="\\t";$snp=$F[0].":".$F[1];print $snp,$F[0],$F[1],$F[3],$F[4],$F[8],$F[9],$F[11]'|grep -v BETA > CAD.tsv
+        '''
+
+comm -12 <(cat BMI.tsv |cut -f1|sort) <(cat CAD.tsv|cut -f1|sort) |comm -12 <(cat DBP.tsv|cut -f1|sort) -|
+    comm -12 <(cat SBP.tsv|cut -f1|sort) -|comm -12 <(cat HDL.tsv|cut -f1|sort) -|
+    comm -12 <(cat LDL.tsv|cut -f1|sort) -|comm -12 <(cat TC.tsv|cut -f1|sort) -|
+    comm -12 <(cat TG.tsv|cut -f1|sort) - > comm.snp.EA.list
+
+rule metacca_gene_EU:
+    input:
+        gene_snp=dir_race+"bed/SNP_gene.annot",
+    output:
+        p=dir_race+"metacca_gene/gene_out/{gene}.p.tsv",
+    log: dir_race+"metacca_gene/gene_out/{gene}.log",
+    params:
+        gene="{gene}",
+        matrix_gene=dir_race+"metacca_gene/gene_out/{gene}.matrix",
+        r2=dir_race+"metacca_gene/gene_out/{gene}.ld",
+        snp_list=dir_race+"metacca_gene/gene_out/{gene}.snp.list",
+        input_prefix=dir_race+"bed/EU.1000g.traitsSNP.prune.inGene",
+        out_prefix=dir_race+"metacca_gene/gene_out/{gene}",
+        matrix=dir_race+"matrix/matrix.tsv",
+        N=N_EU,
+    shell:
+        '''
+        cat {input.gene_snp}|grep {params.gene}|awk '{{print $2}}' |grep -v SNP > {params.snp_list}
+
+        if [  $( cat {params.snp_list}|wc -l ) -eq 1 ];
+        then
+        paste <(echo "{params.gene}") <(cat {params.snp_list}) <(echo "NA") > {output.p}
+        fi;
+
+        if [  $( cat {params.snp_list}|wc -l ) -gt 1 ];
+        then
+        cat <(head -n1 {params.matrix}) <(join <(sort {params.snp_list}) <(sort -k1,1 {params.matrix}))|sed 's/ /\\t/g' > {params.matrix_gene}
+        plink --bfile {params.input_prefix} --out {params.out_prefix} --extract {params.snp_list} --r2 inter-chr with-freqs --ld-window-r2 0
+        Rscript ~/tmp/0815/2.code/2.metaCCA_gene.R {params.N} {params.matrix_gene} {params.r2} {output.p} &> {log}
+        fi;
+        '''
+
+rule get_matrix:
+    input: tsv=dir_race + "tsv/EU.{trait}.tsv"
+    output: tsv=dir_race + "matrix/EU.{trait}.tsv"
+    params: list=dir_race + "bed/gene_snp.list"
+    shell:
+        '''
+        join -a 1 <(sort {params.list}) <(sort -k1,1  {input.tsv}) > {output.tsv}
+        '''
+
+cat ../bed/SNP_gene.annot|awk '$4!="."'|awk '{print $4}'|sed 's/|/\n/g'|cut -d'(' -f1|grep -v ANNOT|sort|uniq > gene_in.list
+
+
+rule get_corr_matrix:
+    input:
+        bed="~/tmp/0815/1.data_raw/EU/bed/EU.1000g.traitsSNP.prune.inGene.bim"
+    output:
+        cor="~/tmp/0815/1.data_raw/EU/corrMatrix/corrMatrix.ld"
+    params:
+        input_prefix="~/tmp/0815/1.data_raw/EU/bed/EU.1000g.traitsSNP.prune.inGene",
+        out_prefix="~/tmp/0815/1.data_raw/EU/corrMatrix/corrMatrix"
+    threads: 16
+    shell:
+            '''
+            plink --threads {threads} --bfile {params.input_prefix} --out {params.out_prefix} --r2 inter-chr with-freqs --ld-window-r2 0
+            '''
+
+
+    rule annotationSNP:
+    input:
+        bim="~/tmp/0815/1.data_raw/EU/bed/EU.1000g.traitsSNP.prune.bim",
+    output:
+        gene_snp_list="~/tmp/0815/1.data_raw/EU/bed/gene_snp.list"
+    params:
+        ref_gene="~/tmp/0815/1.data_raw/EU/bed/glist-hg19",
+        for_anno="~/tmp/0815/1.data_raw/EU/bed/for_anno.list",
+        anno_prefix="~/tmp/0815/1.data_raw/EU/bed/SNP_gene",
+        input_prefix="~/tmp/0815/1.data_raw/EU/bed/EU.1000g.traitsSNP.prune",
+        out_prefix="~/tmp/0815/1.data_raw/EU/bed/EU.1000g.traitsSNP.prune.inGene"
+    shell:
+        '''
+        cat <(echo 'CHR SNP BP') <(cat {input.bim}|cut -f 1,2,4)|sed 's/ /\\t/g' > {params.for_anno}
+        plink --annotate {params.for_anno} ranges={params.ref_gene} --out {params.anno_prefix}
+        cat {params.anno_prefix}.annot |awk '$4!="." {{print $2}}'|grep -v SNP > {output.gene_snp_list}
+        plink --make-bed --bfile {params.input_prefix} --out {params.out_prefix} --extract {output.gene_snp_list} --geno 0.1 --hwe 0.00001 --maf 0.01
+        '''
+
+    rule EU_selectTraitSNP:
+    input:
+        bim="~/1000g/plink_file/European/European.bim",
+    output:
+        bed = "~/tmp/0815/1.data_raw/EU/bed/EU.1000g.traitsSNP.bed"
+    params:
+        snplist="~/tmp/0815/1.data_raw/EU/tsv/comm.snp.EU.1000g.list",
+        input_prefix="~/1000g/plink_file/European/European",
+        out_prefix="~/tmp/0815/1.data_raw/EU/bed/EU.1000g.traitsSNP"
+    shell:
+        '''
+        plink --make-bed --bfile {params.input_prefix} --out {params.out_prefix} --extract {params.snplist} --geno 0.1 --hwe 0.00001 --maf 0.01
+        '''
+
+rule pruning:
+        input:
+            bed = "~/tmp/0815/1.data_raw/EU/bed/EU.1000g.traitsSNP.bed"
+        output:
+            bed = "~/tmp/0815/1.data_raw/EU/bed/EU.1000g.traitsSNP.prune.bed"
+        params:
+            input_prefix    =   "~/tmp/0815/1.data_raw/EU/bed/EU.1000g.traitsSNP",
+            out_prefix      =   "~/tmp/0815/1.data_raw/EU/bed/EU.1000g.traitsSNP.prune",
+            pruned_in       =   "~/tmp/0815/1.data_raw/EU/bed/EU.1000g.traitsSNP.prune.in"
+        shell:
+            '''
+            plink --bfile {params.input_prefix} --indep-pairwise 50 5 0.3 --out {params.input_prefix}
+            plink --make-bed --bfile {params.input_prefix} --out {params.out_prefix} --extract {params.pruned_in}
+            '''
+
+rule EU_bcftools:
+    input:
+        vcf="~/tmp/0815/1.data_raw/EU/vcf/EU_{trait}.vcf.gz"
+    output:
+        tsv="~/tmp/0815/1.data_raw/EU/tsv/EU.{trait}.tsv"
+    params:
+        param="%ID\\t%CHROM\\t%POS\\t%REF\\t%ALT\\t[%ES]\\t[%SE]\\t[%LP]\\n"
+    shell:
+        '''
+        bcftools query -f '{params.param}' -o {output.tsv} {input.vcf}
+        '''
+
+rule extract_individual_CeuEan:
+    input:
+        bed="~/1000g/plink_file/1.raw_transfer/AllChr/AllChr_1000g.SNPOnly.bed",
+        bim="~/1000g/plink_file/1.raw_transfer/AllChr/AllChr_1000g.SNPOnly.bim",
+        fam="~/1000g/plink_file/1.raw_transfer/AllChr/AllChr_1000g.SNPOnly.fam.new"
+    output:
+        bed = "~/1000g/plink_file/European_Eastasian/European_Eastasian.bed"
+    params:
+        list="~/1000g/CeuEan.list",
+        out_prefix="~/1000g/plink_file/European_Eastasian/European_Eastasian"
+    shell:
+        '''
+        plink --bed {input.bed} --bim {input.bim} --fam {input.fam} --keep {params.list} --geno 0.1 --hwe 0.00001 --maf 0.01 --make-bed --out {params.out_prefix}
+        '''
+
+rule extract_individual_ean:
+    input:
+        bed="~/1000g/plink_file/1.raw_transfer/AllChr/AllChr_1000g.SNPOnly.bed",
+        bim="~/1000g/plink_file/1.raw_transfer/AllChr/AllChr_1000g.SNPOnly.bim",
+        fam="~/1000g/plink_file/1.raw_transfer/AllChr/AllChr_1000g.SNPOnly.fam.new"
+    output:
+        bed = "~/1000g/plink_file/Eastasian/Eastasian.bed"
+    params:
+        list="~/1000g/ean.list",
+        out_prefix="~/1000g/plink_file/Eastasian/Eastasian"
+    shell:
+        '''
+        plink --bed {input.bed} --bim {input.bim} --fam {input.fam} --keep {params.list} --geno 0.1 --hwe 0.00001 --maf 0.01 --make-bed --out {params.out_prefix}
+        '''
+
+rule plink_vcf2bed:
+    input:
+        vcf="~/1000g/vcf/ALL.{chr}.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.vcf.gz"
+    output:
+        bed="~/1000g/plink_file/1.raw_transfer/{chr}.bed"
+    params:
+        chr="{chr}",
+        out_prefix="~/1000g/plink_file/1.raw_transfer/{chr}"
+    shell:
+        '''
+        plink --allow-no-sex --biallelic-only --hwe 0.000001 --maf 0.01 --make-bed --vcf {input.vcf}  --out {params.out_prefix}
+        '''
+
+rule generate_flip_list:
+    input:
+        bed="~/1000g/plink_file/1.raw_transfer/raw/{chr}.bed"
+    output:
+        file_flip = "~/1000g/plink_file/1.raw_transfer/fliped/{chr}.missnp"
+    params:
+        chr="{chr}",
+        merge_list="~/1000g/plink_file/1.raw_transfer/mereg_chr1-22.list",
+        in_prefix="~/1000g/plink_file/1.raw_transfer/raw/{chr}",
+        out_prefix="~/1000g/plink_file/1.raw_transfer/fliped/{chr}",
+    shell:
+        '''
+        plink --bfile {params.in_prefix} --merge-list {params.merge_list} --make-bed --out {params.out_prefix}
+        '''
+
+rule remove_dupSNP:
+    input:
+        fam="~/1000g/2504.fam",
+        bed="~/1000g/plink_file/1.raw_transfer/raw/{chr}.bed",
+        bim="~/1000g/plink_file/1.raw_transfer/raw/{chr}.bim",
+    output:
+        bed =           "~/1000g/plink_file/1.raw_transfer/rm_dupSNP/{chr}.bed",
+        file_dupSNP=    "~/1000g/plink_file/1.raw_transfer/rm_dupSNP/{chr}.dup.snp",
+    params:
+        chr="{chr}",
+        in_prefix="~/1000g/plink_file/1.raw_transfer/raw/{chr}",
+        out_prefix="~/1000g/plink_file/1.raw_transfer/rm_dupSNP/{chr}",
+    shell:
+        '''
+        cat {input.bim}|cut -f2|sort |uniq -d > {output.file_dupSNP}
+        plink --bed {input.bed} --bim {input.bim} --fam {input.fam} \
+        --geno 0.1 --hwe 0.00001 --maf 0.01\
+        --exclude {output.file_dupSNP} \
+        --make-bed --out {params.out_prefix}
+        '''
+
+rule flip:
+    input:
+        file_flip = "~/1000g/plink_file/1.raw_transfer/fliped/{chr}-merge.missnp"
+    output:
+        bed = "~/1000g/plink_file/1.raw_transfer/fliped/{chr}.bed",
+    params:
+        chr="{chr}",
+        in_prefix="~/1000g/plink_file/1.raw_transfer/rm_dupSNP/{chr}",
+        out_prefix="~/1000g/plink_file/1.raw_transfer/fliped/{chr}",
+    shell:
+        '''
+        plink --bfile {params.in_prefix} --flip {input.file_flip} --make-bed --out {params.out_prefix}
+        '''
+
+rule combine_all:
+    input:
+        expand("~/1000g/plink_file/1.raw_transfer/rm_dupSNP/{chr}.bed",chr=set_chr_noXY_human)
+    output:
+        bed = "~/1000g/plink_file/1.raw_transfer/AllChr_1000g.bed"
+    params:
+        merge_list="~/1000g/plink_file/1.raw_transfer/mereg_chr1-22.list",
+        out_prefix="~/1000g/plink_file/1.raw_transfer/AllChr_1000g",
+    shell:
+        '''
+        plink --allow-no-sex --biallelic-only --geno 0.1 --hwe 0.00001 --maf 0.01 --merge-list {params.merge_list} --make-bed --out {params.out_prefix}
+        '''
+
+rule remove_indel:
+    input:
+        bed =   "~/1000g/plink_file/1.raw_transfer/AllChr/AllChr_1000g.bed",
+        bim =   "~/1000g/plink_file/1.raw_transfer/AllChr/AllChr_1000g.bim",
+    output:
+        bed = "~/1000g/plink_file/1.raw_transfer/AllChr/AllChr_1000g.SNPOnly.bed",
+        non_snp_list="~/1000g/plink_file/1.raw_transfer/AllChr/non_snp.list"
+    params:
+        input_prefix="~/1000g/plink_file/1.raw_transfer/AllChr/AllChr_1000g",
+        out_prefix = "~/1000g/plink_file/1.raw_transfer/AllChr/AllChr_1000g.SNPOnly",
+    shell:
+        '''
+        cat {input.bim}|perl -lane '$,="\\t";$len1=length($F[4]);$len2=length($F[5]);print F[1] if $len1>1 | $len2>1' > {output.non_snp_list}
+        plink --make-bed --bfile {params.input_prefix} --out {params.out_prefix} --exclude {output.non_snp_list}
+        '''
+
+rule pruning:
+    input:
+        bed = "~/1000g/plink_file/1.raw_transfer/AllChr/AllChr_1000g.SNPOnly.bed",
+    output:
+        bed = "~/1000g/plink_file/1.raw_transfer/AllChr/AllChr_1000g.SNPOnly.prune.bed",
+    params:
+        input_prefix    =   "~/1000g/plink_file/1.raw_transfer/AllChr/AllChr_1000g.SNPOnly",
+        out_prefix      =   "~/1000g/plink_file/1.raw_transfer/AllChr/AllChr_1000g.SNPOnly.prune",
+        pruned_in       =   "~/1000g/plink_file/1.raw_transfer/AllChr/AllChr_1000g.SNPOnly.prune.in"
+    shell:
+        '''
+        plink --bfile {params.input_prefix} --indep-pairwise 50 5 0.2 --out {params.input_prefix}
+        plink --make-bed --bfile {params.input_prefix} --out {params.out_prefix} --extract {params.pruned_in}
+        '''
+
+rule pca:
+    input:
+        bed = "~/1000g/plink_file/1.raw_transfer/AllChr/AllChr_1000g.SNPOnly.prune.bed",
+    output:
+        bmk = "~/1000g/plink_file/1.raw_transfer/AllChr/AllChr_1000g.pca.bmk",
+    benchmark: "~/1000g/plink_file/1.raw_transfer/AllChr/AllChr_1000g.pca.bmk",
+    params:
+        input_prefix    =   "~/1000g/plink_file/1.raw_transfer/AllChr/AllChr_1000g.SNPOnly.prune",
+        output_prefix   =   "~/1000g/plink_file/1.raw_transfer/AllChr/AllChr_1000g.SNPOnly.prune.pca",
+    shell:
+        '''
+        plink --bfile {params.input_prefix} --chr 1-22 --pca --out {params.output_prefix}
+        '''
+
+
+rule extract_individual_ceu:
+    input:
+        bed="~/1000g/plink_file/1.raw_transfer/AllChr/AllChr_1000g.SNPOnly.bed",
+        bim="~/1000g/plink_file/1.raw_transfer/AllChr/AllChr_1000g.SNPOnly.bim",
+        fam="~/1000g/plink_file/1.raw_transfer/AllChr/AllChr_1000g.SNPOnly.fam.new"
+    output:
+        bed = "~/1000g/plink_file/European/European.bed"
+    params:
+        list="~/1000g/ceu.list",
+        input_prefix="~/1000g/plink_file/1.raw_transfer/AllChr/AllChr_1000g.SNPOnly",
+        out_prefix="~/1000g/plink_file/European/European"
+    shell:
+        '''
+        plink --bed {input.bed} --bim {input.bim} --fam {input.fam} --keep {params.list} --geno 0.1 --hwe 0.00001 --maf 0.01 --make-bed --out {params.out_prefix}
+        '''
