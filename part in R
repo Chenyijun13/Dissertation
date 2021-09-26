@@ -1,0 +1,190 @@
+library(dplyr)
+library(stringr)
+library("metaCCA")
+
+# EU ------------
+df_sample_size=data.frame(
+  trait_eu=c("CAD","BMI","DBP","SBP","LDL","HDL","TC","TG"),
+  sample_size_eu=c(547261,681275,757601,757601,440546,403943,115078,441016),
+  stringsAsFactors = F
+)
+
+for(file_one in files_betaSe){
+  print(file_one)
+  traitN=match(file_one,files_betaSe)
+  if(match(file_one,files_betaSe)==1){beta_matrix=get_beta_eu(file_one,traitN)}
+  if(match(file_one,files_betaSe) >1){beta_matrix=beta_matrix %>% left_join(get_beta_eu(file_one,traitN))}
+  
+}
+
+
+S_XY_full_study=as.data.frame(beta_matrix)
+
+row.names(S_XY_full_study)=S_XY_full_study$snp
+S_XY_full_study$snp=NULL
+
+S_XY_full_study$allele_0=as.factor(S_XY_full_study$allele_0)
+S_XY_full_study$allele_1=as.factor(S_XY_full_study$allele_1)
+
+N=min(df_sample_size$sample_size_eu)
+
+
+
+metaCCA_res1 =metaCcaGp( nr_studies = 1,
+                         S_XY =list( S_XY_full_study ),
+                         std_info = 1,
+                         S_YY =list( estimateSyy( S_XY_full_study ) ),
+                         N =  N)
+
+# EA ------------
+df_sample_size=data.frame(
+  trait_eu=c("CAD","BMI","DBP","SBP","LDL","HDL","TC","TG"),
+  sample_size_eu=c(212453,681275,136615,136597,72866,70657,128305,105597),
+  stringsAsFactors = F
+)
+
+files_betaSe=list.files("1.data_raw/EA/matrix",full.names = T)
+files_betaSe=files_betaSe[grepl(".tsv",files_betaSe)]
+files_betaSe=files_betaSe[!grepl("matrix.tsv",files_betaSe)]
+
+for(file_one in files_betaSe){
+  print(file_one)
+  if(match(file_one,files_betaSe)==1){beta_matrix=get_beta_ea(file_one)}
+  if(match(file_one,files_betaSe) >1){beta_matrix=beta_matrix %>% left_join(get_beta_ea(file_one))}
+  
+}
+
+beta_matrix=beta_matrix[!is.na(beta_matrix$CAD_b),]
+
+S_XY_full_study=as.data.frame(beta_matrix)
+
+row.names(S_XY_full_study)=S_XY_full_study$snp
+S_XY_full_study$snp=NULL
+
+S_XY_full_study$allele_0=as.factor(S_XY_full_study$allele_0)
+S_XY_full_study$allele_1=as.factor(S_XY_full_study$allele_1)
+
+N=min(df_sample_size$sample_size_eu)
+
+apply(S_XY_full_study,2,function(x){sum(is.na(x))})
+
+metaCCA_res1 =metaCcaGp( nr_studies = 1,
+                         S_XY =list( S_XY_full_study ),
+                         std_info = 0,
+                         S_YY =list( estimateSyy( S_XY_full_study ) ),
+                         N =  N)
+
+# metaCCA for gene -------------
+
+gene=gsub(".matrix","",basename(file_matrix),1)
+
+#prepare matrix
+S_XY_full_study=get_S_XY(file_matrix)
+snp_list=row.names(S_XY_full_study)
+
+#prepare correlation
+S_XX_study=get_S_XX(file_corr,snp_list)
+
+#meta cca analysis
+metaCCA_res3 =metaCcaGp( nr_studies = 1,
+                         S_XY =list( S_XY_full_study ),
+                         std_info = 0 ,
+                         S_YY =list( estimateSyy( S_XY_full_study ) ),
+                         N = N,
+                         analysis_type = 2,
+                         SNP_id =snp_list,
+                         S_XX =list( S_XX_study))
+
+metaCCA_res3$snp=paste0(snp_list,collapse = ",")
+
+
+# EU gene-based analysis ------------
+files_genebased=list.files("1.data_raw/EU/magma",full.names = T)
+files_genebased=files_genebased[grepl(".genes.out",files_genebased)]
+
+df_genebased_EU=get_geneBased_for_filelist(files_genebased)
+
+Gene_Metacca_EU=read_metacca_gene_file("1.data_raw/EU/metacca_gene/gene.p.sorted.new.tsv",13139)
+
+P_merge_EU=Gene_Metacca_EU %>% left_join(df_genebased_EU)
+
+P_merge_EU1=P_merge_EU %>% filter(Metacca_P_fdr<0.05 & num_sig_fdr>=2)
+
+# EA gene-based analysis------------
+files_genebased_EA=list.files("1.data_raw/EA/magma",full.names = T)
+files_genebased_EA=files_genebased[grepl(".genes.out",files_genebased)]
+
+df_genebased_EA=get_geneBased_for_filelist(files_genebased_EA)
+
+Gene_Metacca_EA=read_metacca_gene_file("1.data_raw/EA/metacca_gene/gene.p.sorted.tsv",14388)
+
+P_merge_EA=Gene_Metacca_EA %>% left_join(df_genebased_EA)
+
+P_merge_EA1=P_merge_EA %>% filter(Metacca_P_fdr<0.05 & num_sig_fdr>=2)
+
+#manhattan plot -----------
+png("2.code/out/manhattan_metacca_snp_EA.png",width = 4000,height = 2000,res=300)
+manhattan(metacca_snp_p_EA, 
+          chr = "chr",
+          bp = "pos",
+          p = "Metacca_P",
+          snp = "snp",
+          main = "Manhattan Plot",  cex = 0.6, cex.axis = 0.9, ylim=c(0,50),
+          col = c("blue4", "orange3"), 
+          suggestiveline = F, genomewideline = F, chrlabs = c(1:22))
+abline(h=-log10(5E-8),col="red")
+dev.off()
+
+png("2.code/out/manhattan_metacca_snp_EU.png",width = 4000,height = 2000,res=300)
+manhattan(metacca_snp_p_EU, 
+          chr = "chr",
+          bp = "pos",
+          p = "Metacca_P",
+          snp = "snp",
+          main = "Manhattan Plot",  
+          cex = 0.6, cex.axis = 0.9, ylim=c(0,50),
+          col = c("blue4", "orange3"), 
+          suggestiveline = F, genomewideline = F, chrlabs = c(1:22))
+abline(h=-log10(5E-8),col="red")
+dev.off()
+
+#overlapped snps -----------
+list_in = list(
+  European=metacca_snp_p_EU1$snp,
+  East_asian=metacca_snp_p_EA1$snp
+)
+
+ggvenn::ggvenn(
+  list_in, 
+  fill_color = c("#0073C2FF", "#EFC000FF"),
+  stroke_size = 0.5, set_name_size = 4
+)
+
+#overlapped genes ------------
+gene_eu=read_tsv("2.code/out/P_merge_EU1.tsv")
+gene_ea=read_tsv("2.code/out/P_merge_EA1.tsv")
+
+
+list_in = list(
+  European=gene_eu$Gene_name,
+  East_asian=gene_ea$Gene_name
+)
+
+ggvenn::ggvenn(
+  list_in, 
+  fill_color = c("#0073C2FF", "#EFC000FF"),
+  stroke_size = 0.5, set_name_size = 4
+)
+
+
+
+
+
+
+
+
+
+
+
+
+
